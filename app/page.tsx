@@ -27,9 +27,10 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
-function isoLocal(date: Date) {
-  const offset = date.getTimezoneOffset();
-  return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 10);
+function isoInSeoul(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const value = (type: string) => parts.find(part => part.type === type)?.value;
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function getWeek(dateValue: string) {
@@ -40,11 +41,13 @@ function getWeek(dateValue: string) {
 }
 
 function weekRange(week: number) {
-  const start = new Date(`${PROJECT_START}T00:00:00+09:00`);
-  start.setDate(start.getDate() + (week - 1) * 7);
-  const end = new Date(start); end.setDate(end.getDate() + 6);
-  const fmt = (d: Date) => `${d.getMonth() + 1}월 ${d.getDate()}일`;
-  return { start: isoLocal(start), end: isoLocal(end), label: `${fmt(start)} — ${fmt(end)}` };
+  const projectStart = new Date(`${PROJECT_START}T00:00:00+09:00`).getTime();
+  const start = new Date(projectStart + (week - 1) * 7 * 86400000);
+  const end = new Date(start.getTime() + 6 * 86400000);
+  const startIso = isoInSeoul(start);
+  const endIso = isoInSeoul(end);
+  const fmt = (value: string) => `${Number(value.slice(5, 7))}월 ${Number(value.slice(8, 10))}일`;
+  return { start: startIso, end: endIso, label: `${fmt(startIso)} — ${fmt(endIso)}` };
 }
 
 function Marks({ count, activity }: { count: number; activity: Activity }) {
@@ -54,7 +57,7 @@ function Marks({ count, activity }: { count: number; activity: Activity }) {
 }
 
 export default function Home() {
-  const today = isoLocal(new Date());
+  const today = isoInSeoul(new Date());
   const latestAllowedDate = today < PROJECT_START ? PROJECT_START : today > PROJECT_END ? PROJECT_END : today;
   const [week, setWeek] = useState(getWeek(today));
   const [members, setMembers] = useState<Member[]>(fallbackMembers);
