@@ -4,8 +4,17 @@
 .modal textarea:focus { border-color: var(--coral); }
 .fieldHelp { display: block; color: #8d8b84; font-size: 10px; line-height: 1.6; margin-top: 7px; }
 .wideModal { width: min(520px, 100%); }
+.weekTabs { grid-template-columns: repeat(5, 1fr); }
+.totalTab { border-left: 1px solid var(--line) !important; }
+.totalBar { width: min(112px, 70%); height: 8px; overflow: hidden; background: #ece6dd; display: block; }
+.totalBar i { display: block; height: 100%; }
+.totalBar.exercise i { background: var(--coral); }
+.totalBar.reading i { background: var(--green); }
+.memberPercent { font: 700 20px 'Gowun Batang', serif; color: var(--green); }
 
 @media (max-width: 760px) {
   .boardActions { align-items: stretch; flex-direction: column; }
   .memberButton { font-size: 10px; padding: 8px 10px; }
+  .weekTabs { grid-template-columns: repeat(5, 118px); }
+  .totalBar { width: 70%; }
 }

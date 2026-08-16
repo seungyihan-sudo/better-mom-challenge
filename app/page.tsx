@@ -59,7 +59,7 @@ function Marks({ count, activity }: { count: number; activity: Activity }) {
 export default function Home() {
   const today = isoInSeoul(new Date());
   const latestAllowedDate = today < PROJECT_START ? PROJECT_START : today > PROJECT_END ? PROJECT_END : today;
-  const [week, setWeek] = useState(getWeek(today));
+  const [week, setWeek] = useState<number | "total">(getWeek(today));
   const [members, setMembers] = useState<Member[]>(supabase ? [] : fallbackMembers);
   const [attendance, setAttendance] = useState<Attendance[]>(supabase ? [] : fallbackAttendance);
   const [user, setUser] = useState<User | null>(null);
@@ -76,7 +76,7 @@ export default function Home() {
   const [memberId, setMemberId] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const range = weekRange(week);
+  const range = weekRange(week === "total" ? 4 : week);
 
   const load = async (activeUser?: User | null) => {
     if (!supabase) return;
@@ -103,12 +103,13 @@ export default function Home() {
   }, []);
 
   const rows = useMemo(() => members.map(member => {
-    const records = attendance.filter(a => a.member_id === member.id && a.attended_on >= range.start && a.attended_on <= range.end);
+    const records = attendance.filter(a => a.member_id === member.id && (week === "total" || (a.attended_on >= range.start && a.attended_on <= range.end)));
     return { ...member, exercise: records.filter(a => a.activity === "exercise").length, reading: records.filter(a => a.activity === "reading").length, latest: records.map(a => a.attended_on).sort().at(-1) };
-  }), [members, attendance, range.start, range.end]);
-  const completed = rows.filter(row => row.exercise >= 3 && row.reading >= 3).length;
-  const totalDone = rows.reduce((sum, row) => sum + Math.min(3,row.exercise) + Math.min(3,row.reading), 0);
-  const percent = rows.length ? Math.round(totalDone / (rows.length * 6) * 100) : 0;
+  }), [members, attendance, range.start, range.end, week]);
+  const goalPerActivity = week === "total" ? 12 : 3;
+  const completed = rows.filter(row => row.exercise >= goalPerActivity && row.reading >= goalPerActivity).length;
+  const totalDone = rows.reduce((sum, row) => sum + Math.min(goalPerActivity,row.exercise) + Math.min(goalPerActivity,row.reading), 0);
+  const percent = rows.length ? Math.round(totalDone / (rows.length * goalPerActivity * 2) * 100) : 0;
 
   const sendLink = async () => {
     if (!supabase || !email.trim()) return;
@@ -166,18 +167,18 @@ export default function Home() {
 
     <section className="attendancePage">
       <div className="projectMeta"><span>2026. 08. 08 — 09. 04</span><b>4 WEEKS · 주 3회</b></div>
-      <div className="headline"><div><p>현재 인증 현황</p><h1>우리는 지금<br/><em>{percent}%</em> 채웠어요.</h1></div><div className="score"><b>{completed}</b><span>/ {rows.length}명 이번 주 완료</span></div></div>
+      <div className="headline"><div><p>{week === "total" ? "4주 전체 인증 현황" : "현재 인증 현황"}</p><h1>우리는 지금<br/><em>{percent}%</em> 채웠어요.</h1></div><div className="score"><b>{completed}</b><span>/ {rows.length}명 {week === "total" ? "전체 목표 완료" : "이번 주 완료"}</span></div></div>
 
-      <div className="weekTabs" role="tablist" aria-label="주차 선택">{[1,2,3,4].map(w => <button role="tab" aria-selected={week === w} className={week === w ? "active" : ""} onClick={() => setWeek(w)} key={w}><b>{w}주차</b><span>{weekRange(w).label}</span></button>)}</div>
+      <div className="weekTabs" role="tablist" aria-label="주차 및 총합 선택">{[1,2,3,4].map(w => <button role="tab" aria-selected={week === w} className={week === w ? "active" : ""} onClick={() => setWeek(w)} key={w}><b>{w}주차</b><span>{weekRange(w).label}</span></button>)}<button role="tab" aria-selected={week === "total"} className={week === "total" ? "active totalTab" : "totalTab"} onClick={() => setWeek("total")}><b>개인별 총합</b><span>4주 전체</span></button></div>
 
       <section className="board">
-        <div className="boardTitle"><div><span>WEEK {String(week).padStart(2,"0")}</span><h2>{range.label} 출석</h2></div><div className="boardActions">{me?.role === "admin" && <button className="memberButton" onClick={() => { setMessage(""); setBulkOpen(true); }}>회원 일괄 등록</button>}<button className="addButton" onClick={() => openForm()}>+ 인증 입력</button></div></div>
-        <div className="columnHead"><span>회원</span><span>운동 3회</span><span>독서 3회</span><span>상태</span></div>
+        <div className="boardTitle"><div><span>{week === "total" ? "TOTAL 4 WEEKS" : `WEEK ${String(week).padStart(2,"0")}`}</span><h2>{week === "total" ? "개인별 누적 인증" : `${range.label} 출석`}</h2></div><div className="boardActions">{me?.role === "admin" && <button className="memberButton" onClick={() => { setMessage(""); setBulkOpen(true); }}>회원 일괄 등록</button>}<button className="addButton" onClick={() => openForm()}>+ 인증 입력</button></div></div>
+        <div className="columnHead"><span>회원</span><span>운동 {goalPerActivity}회</span><span>독서 {goalPerActivity}회</span><span>{week === "total" ? "달성률" : "상태"}</span></div>
         <div className="memberList">{rows.map(row => <div className="attendanceRow" key={row.id}>
           <div className="memberName"><i>{row.display_name[0]}</i><div><b>{row.display_name}</b><small>{row.latest ? `마지막 인증 ${Number(row.latest.slice(5,7))}/${Number(row.latest.slice(8,10))}` : "아직 인증 없음"}</small></div></div>
-          <div className="progressCell"><Marks count={Math.min(3,row.exercise)} activity="exercise"/><b>{Math.min(3,row.exercise)}/3</b></div>
-          <div className="progressCell"><Marks count={Math.min(3,row.reading)} activity="reading"/><b>{Math.min(3,row.reading)}/3</b></div>
-          <div className="rowAction"><span className={row.exercise >= 3 && row.reading >= 3 ? "complete" : "ongoing"}>{row.exercise >= 3 && row.reading >= 3 ? "완료" : row.exercise + row.reading === 0 ? "시작 전" : "진행 중"}</span>{me?.role === "admin" && <button onClick={() => openForm(row.id)}>+입력</button>}</div>
+          <div className="progressCell">{week === "total" ? <span className="totalBar exercise"><i style={{width:`${Math.min(100,row.exercise / 12 * 100)}%`}}/></span> : <Marks count={Math.min(3,row.exercise)} activity="exercise"/>}<b>{Math.min(goalPerActivity,row.exercise)}/{goalPerActivity}</b></div>
+          <div className="progressCell">{week === "total" ? <span className="totalBar reading"><i style={{width:`${Math.min(100,row.reading / 12 * 100)}%`}}/></span> : <Marks count={Math.min(3,row.reading)} activity="reading"/>}<b>{Math.min(goalPerActivity,row.reading)}/{goalPerActivity}</b></div>
+          <div className="rowAction">{week === "total" ? <strong className="memberPercent">{Math.round((Math.min(12,row.exercise) + Math.min(12,row.reading)) / 24 * 100)}%</strong> : <span className={row.exercise >= 3 && row.reading >= 3 ? "complete" : "ongoing"}>{row.exercise >= 3 && row.reading >= 3 ? "완료" : row.exercise + row.reading === 0 ? "시작 전" : "진행 중"}</span>}{me?.role === "admin" && <button onClick={() => openForm(row.id)}>+입력</button>}</div>
         </div>)}</div>
       </section>
       <p className="notice">각 인증은 본인과 관리자만 입력할 수 있어요. 2주차에 참여해도 8월 8일부터 오늘까지 지난 기록을 입력할 수 있어요.</p>
