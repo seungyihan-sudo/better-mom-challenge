@@ -11,6 +11,7 @@
 .totalBar.exercise i { background: var(--coral); }
 .totalBar.reading i { background: var(--green); }
 .memberPercent { font: 700 20px 'Gowun Batang', serif; color: var(--green); }
+.pinInput { letter-spacing: .45em; font-weight: 700; font-size: 18px; }
 
 @media (max-width: 760px) {
   .boardActions { align-items: stretch; flex-direction: column; }

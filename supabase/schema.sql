@@ -130,3 +130,239 @@ $$;
 revoke all on function public.admin_add_members(jsonb) from public, anon;
 grant execute on function public.admin_add_members(jsonb) to authenticated;
 alter publication supabase_realtime add table public.attendance;
+
+-- PIN authentication replaces email links for this private challenge.
+create table if not exists private.member_pin_credentials (
+  member_id uuid primary key references public.members(id) on delete cascade,
+  pin_hash text not null,
+  failed_attempts integer not null default 0,
+  locked_until timestamptz,
+  must_change_pin boolean not null default true,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists private.member_pin_sessions (
+  id uuid primary key default gen_random_uuid(),
+  member_id uuid not null references public.members(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null default (now() + interval '30 days'),
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+create index if not exists member_pin_sessions_member_idx on private.member_pin_sessions(member_id);
+create index if not exists member_pin_sessions_expiry_idx on private.member_pin_sessions(expires_at);
+
+alter table public.attendance alter column created_by drop not null;
+alter table public.attendance add column if not exists created_by_member_id uuid references public.members(id);
+create index if not exists attendance_created_by_member_idx on public.attendance(created_by_member_id);
+
+create or replace function private.pin_actor(p_token text)
+returns table(member_id uuid, display_name text, role text, must_change_pin boolean)
+language sql
+security definer
+set search_path = ''
+as $$
+  select m.id, m.display_name, m.role, c.must_change_pin
+  from private.member_pin_sessions s
+  join public.members m on m.id = s.member_id and m.active = true
+  join private.member_pin_credentials c on c.member_id = m.id
+  where s.token_hash = encode(extensions.digest(p_token, 'sha256'), 'hex')
+    and s.expires_at > now()
+  limit 1
+$$;
+revoke all on function private.pin_actor(text) from public, anon, authenticated;
+
+create or replace function public.pin_login(p_name text, p_pin text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  target public.members%rowtype;
+  credential private.member_pin_credentials%rowtype;
+  plain_token text;
+begin
+  if char_length(btrim(coalesce(p_name, ''))) not between 1 and 30 or coalesce(p_pin, '') !~ '^[0-9]{6}$' then
+    return jsonb_build_object('ok', false, 'error', '이름 또는 PIN을 확인해주세요.');
+  end if;
+
+  select * into target from public.members
+  where display_name = btrim(p_name) and active = true limit 1;
+  if target.id is null then
+    perform pg_sleep(0.25);
+    return jsonb_build_object('ok', false, 'error', '이름 또는 PIN을 확인해주세요.');
+  end if;
+
+  select * into credential from private.member_pin_credentials
+  where member_id = target.id for update;
+  if credential.member_id is null or (credential.locked_until is not null and credential.locked_until > now()) then
+    return jsonb_build_object('ok', false, 'error', '잠시 후 다시 시도하거나 관리자에게 PIN 재설정을 요청해주세요.');
+  end if;
+
+  if extensions.crypt(p_pin, credential.pin_hash) <> credential.pin_hash then
+    update private.member_pin_credentials
+    set failed_attempts = failed_attempts + 1,
+        locked_until = case when failed_attempts + 1 >= 5 then now() + interval '15 minutes' else null end,
+        updated_at = now()
+    where member_id = target.id;
+    return jsonb_build_object('ok', false, 'error', '이름 또는 PIN을 확인해주세요.');
+  end if;
+
+  update private.member_pin_credentials set failed_attempts = 0, locked_until = null, updated_at = now()
+  where member_id = target.id;
+  delete from private.member_pin_sessions where expires_at <= now();
+  plain_token := encode(extensions.gen_random_bytes(32), 'hex');
+  insert into private.member_pin_sessions(member_id, token_hash)
+  values (target.id, encode(extensions.digest(plain_token, 'sha256'), 'hex'));
+  return jsonb_build_object('ok', true, 'token', plain_token);
+end;
+$$;
+
+create or replace function public.pin_session_profile(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare actor record;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null then return jsonb_build_object('ok', false); end if;
+  update private.member_pin_sessions set last_seen_at = now()
+  where token_hash = encode(extensions.digest(p_token, 'sha256'), 'hex');
+  return jsonb_build_object('ok', true, 'member', jsonb_build_object(
+    'id', actor.member_id, 'display_name', actor.display_name, 'role', actor.role,
+    'user_id', null, 'must_change_pin', actor.must_change_pin
+  ));
+end;
+$$;
+
+create or replace function public.pin_logout(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  delete from private.member_pin_sessions
+  where token_hash = encode(extensions.digest(p_token, 'sha256'), 'hex');
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.pin_add_attendance(p_token text, p_member_id uuid, p_activity text, p_attended_on date)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare actor record;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null then return jsonb_build_object('ok', false, 'error', '다시 로그인해주세요.'); end if;
+  if actor.must_change_pin then return jsonb_build_object('ok', false, 'error', '먼저 임시 PIN을 변경해주세요.'); end if;
+  if actor.role <> 'admin' and actor.member_id <> p_member_id then
+    return jsonb_build_object('ok', false, 'error', '본인의 출석만 입력할 수 있어요.');
+  end if;
+  if p_activity not in ('exercise', 'reading') or p_attended_on < date '2026-08-08'
+     or p_attended_on > date '2026-09-04' or p_attended_on > timezone('Asia/Seoul', now())::date then
+    return jsonb_build_object('ok', false, 'error', '인증 종류 또는 날짜를 확인해주세요.');
+  end if;
+  begin
+    insert into public.attendance(member_id, activity, attended_on, created_by_member_id)
+    values (p_member_id, p_activity, p_attended_on, actor.member_id);
+  exception when unique_violation then
+    return jsonb_build_object('ok', false, 'error', '이미 같은 날짜에 인증했어요.');
+  end;
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.pin_admin_upsert_members(p_token text, p_entries jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare actor record; entry jsonb; member_name text; member_pin text; target_id uuid; changed integer := 0;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or actor.role <> 'admin' then
+    return jsonb_build_object('ok', false, 'error', '관리자만 회원 PIN을 설정할 수 있어요.');
+  end if;
+  if jsonb_typeof(p_entries) <> 'array' or jsonb_array_length(p_entries) not between 1 and 100 then
+    return jsonb_build_object('ok', false, 'error', '회원은 한 번에 1명부터 100명까지 입력해주세요.');
+  end if;
+  for entry in select value from jsonb_array_elements(p_entries) loop
+    member_name := btrim(entry->>'name'); member_pin := entry->>'pin';
+    if char_length(coalesce(member_name, '')) not between 1 and 30 or coalesce(member_pin, '') !~ '^[0-9]{6}$' then
+      return jsonb_build_object('ok', false, 'error', '이름과 숫자 6자리 PIN을 확인해주세요.');
+    end if;
+    select id into target_id from public.members where display_name = member_name limit 1;
+    if target_id is null then
+      insert into public.members(display_name, role) values (member_name, 'member') returning id into target_id;
+    else
+      update public.members set active = true where id = target_id;
+    end if;
+    insert into private.member_pin_credentials(member_id, pin_hash, must_change_pin, failed_attempts, locked_until, updated_at)
+    values (target_id, extensions.crypt(member_pin, extensions.gen_salt('bf', 10)), true, 0, null, now())
+    on conflict (member_id) do update set pin_hash = excluded.pin_hash, must_change_pin = true,
+      failed_attempts = 0, locked_until = null, updated_at = now();
+    delete from private.member_pin_sessions where member_id = target_id;
+    changed := changed + 1;
+  end loop;
+  return jsonb_build_object('ok', true, 'count', changed);
+end;
+$$;
+
+create or replace function public.pin_admin_reset_member_pin(p_token text, p_member_id uuid, p_new_pin text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare actor record;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or actor.role <> 'admin' or coalesce(p_new_pin, '') !~ '^[0-9]{6}$' then
+    return jsonb_build_object('ok', false, 'error', '관리자 권한 또는 PIN을 확인해주세요.');
+  end if;
+  insert into private.member_pin_credentials(member_id, pin_hash, must_change_pin, failed_attempts, locked_until, updated_at)
+  values (p_member_id, extensions.crypt(p_new_pin, extensions.gen_salt('bf', 10)), true, 0, null, now())
+  on conflict (member_id) do update set pin_hash = excluded.pin_hash, must_change_pin = true,
+    failed_attempts = 0, locked_until = null, updated_at = now();
+  delete from private.member_pin_sessions where member_id = p_member_id;
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.pin_change_own_pin(p_token text, p_new_pin text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare actor record;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or coalesce(p_new_pin, '') !~ '^[0-9]{6}$' then
+    return jsonb_build_object('ok', false, 'error', 'PIN은 숫자 6자리로 입력해주세요.');
+  end if;
+  update private.member_pin_credentials set pin_hash = extensions.crypt(p_new_pin, extensions.gen_salt('bf', 10)),
+    must_change_pin = false, failed_attempts = 0, locked_until = null, updated_at = now()
+  where member_id = actor.member_id;
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+revoke all on function public.pin_login(text, text) from public;
+revoke all on function public.pin_session_profile(text) from public;
+revoke all on function public.pin_logout(text) from public;
+revoke all on function public.pin_add_attendance(text, uuid, text, date) from public;
+revoke all on function public.pin_admin_upsert_members(text, jsonb) from public;
+revoke all on function public.pin_admin_reset_member_pin(text, uuid, text) from public;
+revoke all on function public.pin_change_own_pin(text, text) from public;
+grant execute on function public.pin_login(text, text), public.pin_session_profile(text), public.pin_logout(text),
+  public.pin_add_attendance(text, uuid, text, date), public.pin_admin_upsert_members(text, jsonb),
+  public.pin_admin_reset_member_pin(text, uuid, text), public.pin_change_own_pin(text, text) to anon, authenticated;
