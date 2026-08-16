@@ -60,8 +60,8 @@ export default function Home() {
   const today = isoInSeoul(new Date());
   const latestAllowedDate = today < PROJECT_START ? PROJECT_START : today > PROJECT_END ? PROJECT_END : today;
   const [week, setWeek] = useState(getWeek(today));
-  const [members, setMembers] = useState<Member[]>(fallbackMembers);
-  const [attendance, setAttendance] = useState<Attendance[]>(fallbackAttendance);
+  const [members, setMembers] = useState<Member[]>(supabase ? [] : fallbackMembers);
+  const [attendance, setAttendance] = useState<Attendance[]>(supabase ? [] : fallbackAttendance);
   const [user, setUser] = useState<User | null>(null);
   const [me, setMe] = useState<Member | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
