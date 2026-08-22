@@ -153,7 +153,7 @@ create index if not exists member_pin_sessions_member_idx on private.member_pin_
 create index if not exists member_pin_sessions_expiry_idx on private.member_pin_sessions(expires_at);
 
 alter table public.attendance alter column created_by drop not null;
-alter table public.attendance add column if not exists created_by_member_id uuid references public.members(id);
+alter table public.attendance add column if not exists created_by_member_id uuid references public.members(id) on delete set null;
 create index if not exists attendance_created_by_member_idx on public.attendance(created_by_member_id);
 
 create or replace function private.pin_actor(p_token text)
@@ -356,6 +356,46 @@ begin
 end;
 $$;
 
+create or replace function public.pin_admin_rename_member(p_token text, p_member_id uuid, p_new_name text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare actor record; clean_name text := btrim(p_new_name); target_exists boolean;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or actor.role <> 'admin' then
+    return jsonb_build_object('ok', false, 'error', '관리자만 회원 이름을 수정할 수 있어요.');
+  end if;
+  if char_length(coalesce(clean_name, '')) not between 1 and 30 then
+    return jsonb_build_object('ok', false, 'error', '이름은 1자부터 30자까지 입력해주세요.');
+  end if;
+  select exists(select 1 from public.members where id = p_member_id and active = true) into target_exists;
+  if not target_exists then return jsonb_build_object('ok', false, 'error', '회원을 찾을 수 없어요.'); end if;
+  begin
+    update public.members set display_name = clean_name where id = p_member_id;
+  exception when unique_violation then
+    return jsonb_build_object('ok', false, 'error', '이미 사용 중인 회원 이름이에요.');
+  end;
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+create or replace function public.pin_admin_delete_member(p_token text, p_member_id uuid)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare actor record; target_role text;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or actor.role <> 'admin' then
+    return jsonb_build_object('ok', false, 'error', '관리자만 회원을 삭제할 수 있어요.');
+  end if;
+  select role into target_role from public.members where id = p_member_id and active = true;
+  if target_role is null then return jsonb_build_object('ok', false, 'error', '회원을 찾을 수 없어요.'); end if;
+  if p_member_id = actor.member_id or target_role = 'admin' then
+    return jsonb_build_object('ok', false, 'error', '관리자 본인 계정은 삭제할 수 없어요.');
+  end if;
+  delete from public.members where id = p_member_id;
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
 revoke all on function public.pin_login(text, text) from public;
 revoke all on function public.pin_session_profile(text) from public;
 revoke all on function public.pin_logout(text) from public;
@@ -363,6 +403,9 @@ revoke all on function public.pin_add_attendance(text, uuid, text, date) from pu
 revoke all on function public.pin_admin_upsert_members(text, jsonb) from public;
 revoke all on function public.pin_admin_reset_member_pin(text, uuid, text) from public;
 revoke all on function public.pin_change_own_pin(text, text) from public;
+revoke all on function public.pin_admin_rename_member(text, uuid, text) from public;
+revoke all on function public.pin_admin_delete_member(text, uuid) from public;
 grant execute on function public.pin_login(text, text), public.pin_session_profile(text), public.pin_logout(text),
   public.pin_add_attendance(text, uuid, text, date), public.pin_admin_upsert_members(text, jsonb),
-  public.pin_admin_reset_member_pin(text, uuid, text), public.pin_change_own_pin(text, text) to anon, authenticated;
+  public.pin_admin_reset_member_pin(text, uuid, text), public.pin_change_own_pin(text, text),
+  public.pin_admin_rename_member(text, uuid, text), public.pin_admin_delete_member(text, uuid) to anon, authenticated;

@@ -74,6 +74,9 @@ export default function Home() {
   const [pin, setPin] = useState("");
   const [pinOpen, setPinOpen] = useState(false);
   const [pinTarget, setPinTarget] = useState<(Member & { must_change_pin?: boolean }) | null>(null);
+  const [manageTarget, setManageTarget] = useState<Member | null>(null);
+  const [manageMode, setManageMode] = useState<"rename" | "delete" | null>(null);
+  const [editedName, setEditedName] = useState("");
   const [newPin, setNewPin] = useState("");
   const [memberLines, setMemberLines] = useState("");
   const [activity, setActivity] = useState<Activity>("exercise");
@@ -171,6 +174,31 @@ export default function Home() {
     setPinOpen(false); setPinTarget(null); setNewPin(""); setMessage("PIN을 변경했어요."); await load(sessionToken);
   };
 
+  const renameMember = async () => {
+    const name = editedName.trim();
+    if (!supabase || me?.role !== "admin" || !manageTarget || !name) return;
+    setBusy(true); setMessage("");
+    const { data, error } = await supabase.rpc("pin_admin_rename_member", { p_token: sessionToken, p_member_id: manageTarget.id, p_new_name: name });
+    setBusy(false);
+    if (error || !data?.ok) { setMessage(data?.error ?? error?.message ?? "이름을 수정하지 못했어요."); return; }
+    setManageTarget(null); setManageMode(null); setEditedName(""); setMessage("회원 이름을 수정했어요.");
+    await load(sessionToken);
+  };
+
+  const deleteMember = async () => {
+    if (!supabase || me?.role !== "admin" || !manageTarget || manageTarget.id === me.id) return;
+    setBusy(true); setMessage("");
+    const { data, error } = await supabase.rpc("pin_admin_delete_member", { p_token: sessionToken, p_member_id: manageTarget.id });
+    setBusy(false);
+    if (error || !data?.ok) { setMessage(data?.error ?? error?.message ?? "회원을 삭제하지 못했어요."); return; }
+    setManageTarget(null); setManageMode(null); setMessage("회원과 해당 출석 기록을 삭제했어요.");
+    await load(sessionToken);
+  };
+
+  const openMemberManage = (target: Member, mode: "rename" | "delete") => {
+    setManageTarget(target); setManageMode(mode); setEditedName(target.display_name); setMessage("");
+  };
+
   const openForm = (id?: string) => {
     if (!sessionToken || !me) { setLoginOpen(true); return; }
     setMemberId(me.role === "admin" && id ? id : me.id); setMessage(""); setFormOpen(true);
@@ -197,7 +225,7 @@ export default function Home() {
           <div className="memberName"><i>{row.display_name[0]}</i><div><b>{row.display_name}</b><small>{row.latest ? `마지막 인증 ${Number(row.latest.slice(5,7))}/${Number(row.latest.slice(8,10))}` : "아직 인증 없음"}</small></div></div>
           <div className="progressCell">{week === "total" ? <span className="totalBar exercise"><i style={{width:`${Math.min(100,row.exercise / 12 * 100)}%`}}/></span> : <Marks count={Math.min(3,row.exercise)} activity="exercise"/>}<b>{Math.min(goalPerActivity,row.exercise)}/{goalPerActivity}</b></div>
           <div className="progressCell">{week === "total" ? <span className="totalBar reading"><i style={{width:`${Math.min(100,row.reading / 12 * 100)}%`}}/></span> : <Marks count={Math.min(3,row.reading)} activity="reading"/>}<b>{Math.min(goalPerActivity,row.reading)}/{goalPerActivity}</b></div>
-          <div className="rowAction">{week === "total" ? <strong className="memberPercent">{Math.round((Math.min(12,row.exercise) + Math.min(12,row.reading)) / 24 * 100)}%</strong> : <span className={row.exercise >= 3 && row.reading >= 3 ? "complete" : "ongoing"}>{row.exercise >= 3 && row.reading >= 3 ? "완료" : row.exercise + row.reading === 0 ? "시작 전" : "진행 중"}</span>}{me?.role === "admin" && <><button onClick={() => openForm(row.id)}>+입력</button><button onClick={() => { setPinTarget(row); setNewPin(""); setMessage(""); setPinOpen(true); }}>PIN 재설정</button></>}</div>
+          <div className="rowAction">{week === "total" ? <strong className="memberPercent">{Math.round((Math.min(12,row.exercise) + Math.min(12,row.reading)) / 24 * 100)}%</strong> : <span className={row.exercise >= 3 && row.reading >= 3 ? "complete" : "ongoing"}>{row.exercise >= 3 && row.reading >= 3 ? "완료" : row.exercise + row.reading === 0 ? "시작 전" : "진행 중"}</span>}{me?.role === "admin" && <><button onClick={() => openForm(row.id)}>+입력</button><button onClick={() => openMemberManage(row, "rename")}>이름 수정</button><button onClick={() => { setPinTarget(row); setNewPin(""); setMessage(""); setPinOpen(true); }}>PIN 재설정</button>{row.id !== me.id && <button className="dangerLink" onClick={() => openMemberManage(row, "delete")}>삭제</button>}</>}</div>
         </div>)}</div>
       </section>
       <p className="notice">각 인증은 본인과 관리자만 입력할 수 있어요. 2주차에 참여해도 8월 8일부터 오늘까지 지난 기록을 입력할 수 있어요.</p>
@@ -210,5 +238,7 @@ export default function Home() {
     {bulkOpen && <div className="modalBackdrop" onMouseDown={e => e.target === e.currentTarget && setBulkOpen(false)}><section className="modal wideModal" role="dialog" aria-modal="true" aria-labelledby="bulk-title"><button className="close" onClick={() => setBulkOpen(false)} aria-label="닫기">×</button><span className="modalEyebrow">MEMBER LIST</span><h2 id="bulk-title">회원·PIN 일괄 설정</h2><p>한 줄에 한 명씩 이름과 숫자 6자리 임시 PIN을 넣어주세요.</p><label htmlFor="member-lines">이름, PIN</label><textarea id="member-lines" value={memberLines} onChange={e => setMemberLines(e.target.value)} placeholder={"김서윤, 123456\n이민지, 654321"} rows={8}/><small className="fieldHelp">기존 회원 이름을 입력하면 PIN만 다시 설정됩니다. 회원은 첫 로그인 후 자기 PIN으로 변경해요.</small><button className="modalPrimary" onClick={addMembers} disabled={busy || !memberLines.trim()}>{busy ? "저장 중…" : "회원 PIN 저장하기"}</button>{message && <div className="formMessage">{message}</div>}</section></div>}
 
     {pinOpen && pinTarget && <div className="modalBackdrop" onMouseDown={e => e.target === e.currentTarget && !pinTarget.must_change_pin && setPinOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="pin-title">{!pinTarget.must_change_pin && <button className="close" onClick={() => setPinOpen(false)} aria-label="닫기">×</button>}<span className="modalEyebrow">PIN SECURITY</span><h2 id="pin-title">{pinTarget.id === me?.id ? "내 PIN 변경" : `${pinTarget.display_name} PIN 재설정`}</h2><p>{pinTarget.must_change_pin ? "안전을 위해 임시 PIN을 새 PIN으로 바꿔주세요." : "새 숫자 6자리를 입력해주세요. 이전 PIN은 더 이상 사용할 수 없어요."}</p><label htmlFor="new-pin">새 PIN</label><input id="new-pin" className="pinInput" type="password" inputMode="numeric" autoComplete="new-password" value={newPin} onChange={e => setNewPin(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="숫자 6자리" maxLength={6}/><button className="modalPrimary" onClick={saveNewPin} disabled={busy || newPin.length !== 6}>{busy ? "저장 중…" : "새 PIN 저장"}</button>{message && <div className="formMessage">{message}</div>}</section></div>}
+
+    {manageTarget && manageMode && <div className="modalBackdrop" onMouseDown={e => e.target === e.currentTarget && !busy && setManageTarget(null)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="manage-title"><button className="close" onClick={() => setManageTarget(null)} aria-label="닫기">×</button><span className="modalEyebrow">MEMBER MANAGEMENT</span>{manageMode === "rename" ? <><h2 id="manage-title">회원 이름 수정</h2><p>출석 기록과 PIN은 그대로 유지돼요.</p><label htmlFor="edited-name">새 이름</label><input id="edited-name" value={editedName} onChange={e => setEditedName(e.target.value)} maxLength={30} onKeyDown={e => e.key === "Enter" && renameMember()}/><button className="modalPrimary" onClick={renameMember} disabled={busy || !editedName.trim()}>{busy ? "저장 중…" : "이름 저장"}</button></> : <><h2 id="manage-title">{manageTarget.display_name} 회원 삭제</h2><p className="dangerText">이 회원의 운동·독서 출석 기록과 PIN도 모두 삭제됩니다. 삭제 후에는 되돌릴 수 없어요.</p><div className="modalActions"><button className="cancelButton" onClick={() => setManageTarget(null)} disabled={busy}>취소</button><button className="deleteButton" onClick={deleteMember} disabled={busy}>{busy ? "삭제 중…" : "회원 삭제"}</button></div></>}{message && <div className="formMessage">{message}</div>}</section></div>}
   </main>;
 }
