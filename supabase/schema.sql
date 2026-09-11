@@ -16,11 +16,20 @@ create table private.member_invites (
   created_at timestamptz not null default now()
 );
 
+create table public.challenge_config (
+  id boolean primary key default true check (id),
+  start_date date not null,
+  end_date date not null check (end_date = start_date + 27)
+);
+
+insert into public.challenge_config(id, start_date, end_date)
+values (true, date '2026-08-08', date '2026-09-04');
+
 create table public.attendance (
   id uuid primary key default gen_random_uuid(),
   member_id uuid not null references public.members(id) on delete cascade,
   activity text not null check (activity in ('exercise','reading')),
-  attended_on date not null check (attended_on between date '2026-08-08' and date '2026-09-04'),
+  attended_on date not null,
   created_by uuid not null references auth.users(id),
   created_at timestamptz not null default now(),
   unique (member_id, activity, attended_on)
@@ -33,9 +42,11 @@ create unique index one_active_admin_idx on public.members ((role)) where role =
 
 alter table public.members enable row level security;
 alter table public.attendance enable row level security;
+alter table public.challenge_config enable row level security;
 
 create policy "attendance_is_visible_to_everyone" on public.attendance for select to anon, authenticated using (true);
 create policy "active_members_are_visible_to_everyone" on public.members for select to anon, authenticated using (active = true);
+create policy "challenge_config_is_visible_to_everyone" on public.challenge_config for select to anon, authenticated using (true);
 create policy "first_user_can_claim_admin" on public.members for insert to authenticated
 with check (
   role = 'admin'
@@ -46,7 +57,8 @@ with check (
 create policy "members_or_admins_can_add_attendance" on public.attendance for insert to authenticated
 with check (
   (select auth.uid()) = created_by
-  and attended_on between date '2026-08-08' and date '2026-09-04'
+  and attended_on between (select start_date from public.challenge_config where id = true)
+    and (select end_date from public.challenge_config where id = true)
   and attended_on <= timezone('Asia/Seoul', now())::date
   and exists (
     select 1 from public.members target where target.id = member_id and (
@@ -58,7 +70,7 @@ with check (
 );
 
 grant usage on schema public to anon, authenticated;
-grant select on public.members, public.attendance to anon, authenticated;
+grant select on public.members, public.attendance, public.challenge_config to anon, authenticated;
 grant insert on public.members to authenticated;
 grant insert on public.attendance to authenticated;
 revoke all on schema private from public, anon, authenticated;
@@ -257,7 +269,7 @@ language plpgsql
 security definer
 set search_path = ''
 as $$
-declare actor record;
+declare actor record; challenge_start date; challenge_end date;
 begin
   select * into actor from private.pin_actor(p_token);
   if actor.member_id is null then return jsonb_build_object('ok', false, 'error', '다시 로그인해주세요.'); end if;
@@ -265,8 +277,9 @@ begin
   if actor.role <> 'admin' and actor.member_id <> p_member_id then
     return jsonb_build_object('ok', false, 'error', '본인의 출석만 입력할 수 있어요.');
   end if;
-  if p_activity not in ('exercise', 'reading') or p_attended_on < date '2026-08-08'
-     or p_attended_on > date '2026-09-04' or p_attended_on > timezone('Asia/Seoul', now())::date then
+  select start_date, end_date into challenge_start, challenge_end from public.challenge_config where id = true;
+  if p_activity not in ('exercise', 'reading') or p_attended_on < challenge_start
+     or p_attended_on > challenge_end or p_attended_on > timezone('Asia/Seoul', now())::date then
     return jsonb_build_object('ok', false, 'error', '인증 종류 또는 날짜를 확인해주세요.');
   end if;
   begin
@@ -396,6 +409,27 @@ begin
 end;
 $$;
 
+create or replace function public.pin_admin_reset_challenge(p_token text, p_start_date date)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare actor record; new_end_date date;
+begin
+  select * into actor from private.pin_actor(p_token);
+  if actor.member_id is null or actor.role <> 'admin' then
+    return jsonb_build_object('ok', false, 'error', '관리자만 챌린지를 초기화할 수 있어요.');
+  end if;
+  if p_start_date is null or p_start_date < date '2020-01-01' or p_start_date > date '2100-12-31' then
+    return jsonb_build_object('ok', false, 'error', '새 챌린지 시작일을 확인해주세요.');
+  end if;
+  new_end_date := p_start_date + 27;
+  delete from public.attendance;
+  delete from public.members where role <> 'admin';
+  insert into public.challenge_config(id, start_date, end_date)
+  values (true, p_start_date, new_end_date)
+  on conflict (id) do update set start_date = excluded.start_date, end_date = excluded.end_date;
+  return jsonb_build_object('ok', true, 'start_date', p_start_date, 'end_date', new_end_date);
+end;
+$$;
+
 revoke all on function public.pin_login(text, text) from public;
 revoke all on function public.pin_session_profile(text) from public;
 revoke all on function public.pin_logout(text) from public;
@@ -405,7 +439,9 @@ revoke all on function public.pin_admin_reset_member_pin(text, uuid, text) from 
 revoke all on function public.pin_change_own_pin(text, text) from public;
 revoke all on function public.pin_admin_rename_member(text, uuid, text) from public;
 revoke all on function public.pin_admin_delete_member(text, uuid) from public;
+revoke all on function public.pin_admin_reset_challenge(text, date) from public;
 grant execute on function public.pin_login(text, text), public.pin_session_profile(text), public.pin_logout(text),
   public.pin_add_attendance(text, uuid, text, date), public.pin_admin_upsert_members(text, jsonb),
   public.pin_admin_reset_member_pin(text, uuid, text), public.pin_change_own_pin(text, text),
-  public.pin_admin_rename_member(text, uuid, text), public.pin_admin_delete_member(text, uuid) to anon, authenticated;
+  public.pin_admin_rename_member(text, uuid, text), public.pin_admin_delete_member(text, uuid),
+  public.pin_admin_reset_challenge(text, date) to anon, authenticated;
