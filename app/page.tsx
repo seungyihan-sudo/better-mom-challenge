@@ -1,7 +1,7 @@
 "use client";
 
 import { createClient } from "@supabase/supabase-js";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Activity = "exercise" | "reading";
 type Member = { id: string; display_name: string; user_id: string | null; role: "admin" | "member" };
@@ -60,6 +60,8 @@ function Marks({ count, activity }: { count: number; activity: Activity }) {
 }
 
 export default function Home() {
+  const loadSequence = useRef(0);
+  const hasLoadedConfig = useRef(false);
   const today = isoInSeoul(new Date());
   const [config, setConfig] = useState<ChallengeConfig>(INITIAL_CONFIG);
   const latestAllowedDate = today < config.start_date ? config.start_date : today > config.end_date ? config.end_date : today;
@@ -92,13 +94,22 @@ export default function Home() {
 
   const load = async (token?: string) => {
     if (!supabase) return;
+    const requestId = ++loadSequence.current;
     const { data: configData } = await supabase.from("challenge_config").select("start_date,end_date").eq("id", true).maybeSingle();
     const activeConfig = (configData as ChallengeConfig | null) ?? config;
-    if (configData) setConfig(activeConfig);
     const [{ data: memberData }, { data: attendanceData }] = await Promise.all([
       supabase.from("members").select("id,display_name,user_id,role").eq("active", true).order("display_name"),
       supabase.from("attendance").select("id,member_id,activity,attended_on").gte("attended_on", activeConfig.start_date).lte("attended_on", activeConfig.end_date),
     ]);
+    if (requestId !== loadSequence.current) return;
+    if (configData) {
+      setConfig(activeConfig);
+      if (!hasLoadedConfig.current) {
+        setWeek(getWeek(today, activeConfig.start_date));
+        setDate(today < activeConfig.start_date ? activeConfig.start_date : today > activeConfig.end_date ? activeConfig.end_date : today);
+        hasLoadedConfig.current = true;
+      }
+    }
     if (memberData) setMembers(memberData as Member[]);
     if (attendanceData) setAttendance(attendanceData as Attendance[]);
     const activeToken = token ?? window.localStorage.getItem(SESSION_KEY) ?? "";
@@ -217,7 +228,8 @@ export default function Home() {
     setBusy(false);
     if (error || !data?.ok) { setMessage(data?.error ?? error?.message ?? "초기화하지 못했어요."); return; }
     const nextConfig = { start_date: data.start_date as string, end_date: data.end_date as string };
-    setConfig(nextConfig); setWeek(getWeek(today, nextConfig.start_date)); setDate(today < nextConfig.start_date ? nextConfig.start_date : today > nextConfig.end_date ? nextConfig.end_date : today);
+    setConfig(nextConfig); setMembers(current => current.filter(member => member.role === "admin")); setAttendance([]);
+    setWeek(getWeek(today, nextConfig.start_date)); setDate(today < nextConfig.start_date ? nextConfig.start_date : today > nextConfig.end_date ? nextConfig.end_date : today);
     setResetOpen(false); setResetConfirm(""); setMessage("새 4주 챌린지를 시작했어요.");
     await load(sessionToken);
   };
@@ -251,7 +263,7 @@ export default function Home() {
           <div className="rowAction">{week === "total" ? <strong className="memberPercent">{Math.round((Math.min(12,row.exercise) + Math.min(12,row.reading)) / 24 * 100)}%</strong> : <span className={row.exercise >= 3 && row.reading >= 3 ? "complete" : "ongoing"}>{row.exercise >= 3 && row.reading >= 3 ? "완료" : row.exercise + row.reading === 0 ? "시작 전" : "진행 중"}</span>}{me?.role === "admin" && <><button onClick={() => openForm(row.id)}>+입력</button><button onClick={() => openMemberManage(row, "rename")}>이름 수정</button><button onClick={() => { setPinTarget(row); setNewPin(""); setMessage(""); setPinOpen(true); }}>PIN 재설정</button>{row.id !== me.id && <button className="dangerLink" onClick={() => openMemberManage(row, "delete")}>삭제</button>}</>}</div>
         </div>)}</div>
       </section>
-      <p className="notice">각 인증은 본인과 관리자만 입력할 수 있어요. 2주차에 참여해도 8월 8일부터 오늘까지 지난 기록을 입력할 수 있어요.</p>
+      <p className="notice">각 인증은 본인과 관리자만 입력할 수 있어요. 중간에 참여해도 챌린지 시작일부터 오늘까지 지난 기록을 입력할 수 있어요.</p>
     </section>
 
     {loginOpen && <div className="modalBackdrop" onMouseDown={e => e.target === e.currentTarget && setLoginOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="login-title"><button className="close" onClick={() => setLoginOpen(false)} aria-label="닫기">×</button><span className="modalEyebrow">MEMBER LOGIN</span><h2 id="login-title">이름과 PIN으로<br/>인증하기</h2><p>관리자에게 받은 숫자 6자리 PIN을 입력해주세요.</p><label htmlFor="login-name">이름</label><input id="login-name" value={loginName} onChange={e => setLoginName(e.target.value)} placeholder="등록된 이름" maxLength={30}/><label htmlFor="login-pin">PIN</label><input id="login-pin" className="pinInput" type="password" inputMode="numeric" autoComplete="current-password" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="숫자 6자리" maxLength={6} onKeyDown={e => e.key === "Enter" && loginWithPin()}/><button className="modalPrimary" onClick={loginWithPin} disabled={busy || !supabase || !loginName.trim() || pin.length !== 6}>{busy ? "확인 중…" : "로그인"}</button>{!supabase && <small className="setupNote">Supabase 연결 후 로그인이 활성화됩니다.</small>}{message && <div className="formMessage">{message}</div>}</section></div>}

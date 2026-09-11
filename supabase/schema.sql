@@ -421,7 +421,7 @@ begin
     return jsonb_build_object('ok', false, 'error', '새 챌린지 시작일을 확인해주세요.');
   end if;
   new_end_date := p_start_date + 27;
-  delete from public.attendance;
+  delete from public.attendance where id is not null;
   delete from public.members where role <> 'admin';
   insert into public.challenge_config(id, start_date, end_date)
   values (true, p_start_date, new_end_date)
